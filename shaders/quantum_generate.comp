@@ -1,0 +1,222 @@
+#version 430 core
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer CloudBuffer {
+    vec4 data[];
+};
+
+layout(std430, binding = 1) readonly buffer RadialTables {
+    float rMid[];
+};
+
+layout(std430, binding = 2) readonly buffer RadialCDF {
+    float rCdf[];
+};
+
+layout(std430, binding = 3) readonly buffer ThetaTables {
+    float thetaMid[];
+};
+
+layout(std430, binding = 4) readonly buffer ThetaCDF {
+    float thetaCdf[];
+};
+
+uniform uint uSeed;
+uniform uint uCount;
+uniform float uTimePhase;
+uniform float uRMax;
+uniform int uN;
+uniform int uL;
+uniform int uMmag;
+uniform float uA0;
+
+uint pcgHash(uint seed) {
+    uint state = seed * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float randomFloat(inout uint seed) {
+    seed = pcgHash(seed);
+    return float(seed) / 4294967296.0;
+}
+
+float sampleFromCdf(uint tableSize, float u) {
+    u = clamp(u, 0.0, 1.0 - 1e-7);
+    int low = 0;
+    int high = int(tableSize) - 1;
+    while (low < high) {
+        int mid = (low + high) / 2;
+        if (rCdf[mid] < u) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return rMid[low];
+}
+
+float sampleThetaFromCdf(uint tableSize, float u) {
+    u = clamp(u, 0.0, 1.0 - 1e-7);
+    int low = 0;
+    int high = int(tableSize) - 1;
+    while (low < high) {
+        int mid = (low + high) / 2;
+        if (thetaCdf[mid] < u) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return thetaMid[low];
+}
+
+float factorial(int k) {
+    float r = 1.0;
+    for (int i = 2; i <= k; ++i) {
+        r *= float(i);
+    }
+    return r;
+}
+
+float oddFactorialProduct(int m) {
+    if (m <= 0) return 1.0;
+    float r = 1.0;
+    for (int k = 1; k <= m; ++k) {
+        r *= float(2 * k - 1);
+    }
+    return r;
+}
+
+float assocLaguerre(int nPoly, float alpha, float x) {
+    if (nPoly < 0) return 0.0;
+    if (nPoly == 0) return 1.0;
+    float L0 = 1.0;
+    float L1 = 1.0 + alpha - x;
+    if (nPoly == 1) return L1;
+    float Lnm2 = L0;
+    float Lnm1 = L1;
+    for (int k = 1; k < nPoly; ++k) {
+        float Lk = (((2.0 * k + alpha + 1.0) - x) * Lnm1 - (k + alpha) * Lnm2) / (k + 1.0);
+        Lnm2 = Lnm1;
+        Lnm1 = Lk;
+    }
+    return Lnm1;
+}
+
+float legendrePlm(int ll, int mm, float x) {
+    x = clamp(x, -1.0, 1.0);
+    if (mm < 0) mm = -mm;
+    if (mm > ll) return 0.0;
+    float sx = sqrt(max(0.0, 1.0 - x * x));
+    float Pmm = ((mm % 2) == 0 ? 1.0 : -1.0) * oddFactorialProduct(mm) * pow(sx, float(mm));
+    if (ll == mm) return Pmm;
+    float Pm1m = x * (2 * mm + 1) * Pmm;
+    if (ll == mm + 1) return Pm1m;
+    float Pj2 = Pmm;
+    float Pj1 = Pm1m;
+    for (int j = mm + 2; j <= ll; ++j) {
+        float Pj = (x * (2 * j - 1) * Pj1 - (j + mm - 1) * Pj2) / (j - mm);
+        Pj2 = Pj1;
+        Pj1 = Pj;
+    }
+    return Pj1;
+}
+
+float radialRnl(float r, int n, int l, float a0) {
+    if (r <= 0.0) return 0.0;
+    int np = n - l - 1;
+    float alpha = 2.0 * l + 1.0;
+    float Z = 1.0;
+    float rho = 2.0 * Z * r / (float(n) * a0);
+    float norm = sqrt(pow(2.0 * Z / (float(n) * a0), 3.0) * factorial(n - l - 1) /
+                      (2.0 * float(n) * factorial(n + l)));
+    float L = assocLaguerre(np, alpha, rho);
+    return norm * exp(-rho * 0.5) * pow(rho, float(l)) * L;
+}
+
+float ylmNorm(int ll, int mm) {
+    mm = abs(mm);
+    return sqrt((2.0 * ll + 1.0) / (4.0 * 3.14159265) * factorial(ll - mm) / factorial(ll + mm));
+}
+
+float angularDensity(int ll, int mm, float theta) {
+    float ct = cos(theta);
+    float P = legendrePlm(ll, mm, ct);
+    float N = ylmNorm(ll, mm);
+    float y = N * P;
+    return y * y;
+}
+
+vec3 heatmapFire(float value) {
+    value = clamp(value, 0.0, 1.0);
+    const int num_stops = 6;
+    vec3 colors[6] = vec3[](
+        vec3(0.0, 0.0, 0.0),
+        vec3(0.5, 0.0, 0.99),
+        vec3(0.8, 0.0, 0.0),
+        vec3(1.0, 0.5, 0.0),
+        vec3(1.0, 1.0, 0.0),
+        vec3(1.0, 1.0, 1.0)
+    );
+    float scaled_v = value * float(num_stops - 1);
+    int i = int(scaled_v);
+    int next_i = min(i + 1, num_stops - 1);
+    float local_t = scaled_v - float(i);
+    return colors[i] + local_t * (colors[next_i] - colors[i]);
+}
+
+vec3 infernoRgb(float r, float theta, int n, int l, int mmag, float a0) {
+    float Rb = radialRnl(r, n, l, a0);
+    float Plm = legendrePlm(l, mmag, cos(theta));
+    float intensity = Rb * Rb * Plm * Plm;
+    float mapped = intensity * 1.5 * pow(5.0, float(n));
+    vec3 c = heatmapFire(mapped);
+    vec3 floorColor = vec3(0.22, 0.32, 0.68);
+    return max(c, floorColor * 0.55) * 0.92 + floorColor * 0.08;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uCount) return;
+
+    uint seed = uSeed + idx * 1103515245u;
+    
+    float u1 = randomFloat(seed);
+    float u2 = randomFloat(seed);
+    float u3 = randomFloat(seed);
+
+    float r = sampleFromCdf(uint(rMid.length()), u1);
+    float theta = sampleThetaFromCdf(uint(thetaMid.length()), u2);
+    float phi = u3 * 2.0 * 3.14159265;
+
+    float sinTheta = sin(theta);
+    float cosTheta = cos(theta);
+    float cosPhi = cos(phi);
+    float sinPhi = sin(phi);
+
+    float x = r * sinTheta * cosPhi;
+    float y = r * sinTheta * sinPhi;
+    float z = r * cosTheta;
+
+    float R = radialRnl(r, uN, uL, uA0);
+    float P = legendrePlm(uL, uMmag, cosTheta);
+    float N = ylmNorm(uL, uMmag);
+    float phiT = float(uMmag) * phi + uTimePhase;
+    float pr = R * N * P * cos(phiT);
+    float pi = R * N * P * sin(phiT);
+    float phase = atan(pi, pr);
+
+    float ad = angularDensity(uL, uMmag, theta);
+    float rho = R * R * ad;
+    
+    float rhoMax = 1.0;
+    float dnorm = min(1.0, rho / rhoMax);
+
+    vec3 heat = infernoRgb(r, theta, uN, uL, uMmag, uA0);
+
+    uint k = idx * 2u;
+    data[k] = vec4(x, y, z, dnorm);
+    data[k + 1u] = vec4(heat, phase);
+}

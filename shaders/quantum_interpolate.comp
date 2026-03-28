@@ -1,0 +1,49 @@
+#version 430 core
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer CloudBuffer {
+    vec4 data[];
+};
+
+layout(std430, binding = 5) readonly buffer CloudTarget {
+    vec4 target[];
+};
+
+uniform float uLerpFactor;
+
+float smootherstep(float t) {
+    t = clamp(t, 0.0, 1.0);
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint k = idx * 2u;
+    
+    if (k + 1u >= data.length()) return;
+
+    float t = smootherstep(uLerpFactor);
+
+    vec3 posStart = data[k].xyz;
+    vec3 posEnd = target[k].xyz;
+    vec3 posLerp = mix(posStart, posEnd, t);
+    
+    float normStart = data[k].w;
+    float normEnd = target[k].w;
+    float normLerp = mix(normStart, normEnd, t);
+
+    vec3 colorStart = data[k + 1u].xyz;
+    vec3 colorEnd = target[k + 1u].xyz;
+    vec3 colorLerp = mix(colorStart, colorEnd, t);
+
+    float phaseStart = data[k + 1u].w;
+    float phaseEnd = target[k + 1u].w;
+    float phaseDiff = phaseEnd - phaseStart;
+    if (phaseDiff > 3.14159265) phaseDiff -= 6.28318531;
+    if (phaseDiff < -3.14159265) phaseDiff += 6.28318531;
+    float phaseLerp = phaseStart + phaseDiff * t;
+
+    data[k] = vec4(posLerp, normLerp);
+    data[k + 1u] = vec4(colorLerp, phaseLerp);
+}

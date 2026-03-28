@@ -46,6 +46,11 @@ add_executable(${PROJECT_NAME}
     src/QuantumHydrogen.cpp
     src/SphereMesh.cpp
     src/SimpleUI.cpp
+    src/BufferHandle.cpp
+    src/Window.cpp
+    src/InputManager.cpp
+    src/AtomSimulation.cpp
+    src/ComputeShader.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

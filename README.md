@@ -7,20 +7,6 @@ What the model does:
 2. Using the schrodinger equation, sample r, theta, and phi coordinates from those quantum numbers
 3. Render those possible positions and color code them relative to their probabilities (brighter areas have higher probability)
 
-
-Screenshots
-
-<p align="center">
-  <img src="images/1.png" width="32%" alt="Orbital 1" />
-  <img src="images/2.png" width="32%" alt="Orbital 2" />
-  <img src="images/3.png" width="32%" alt="Orbital 3" />
-</p>
-<p align="center">
-  <img src="images/4.png" width="32%" alt="Orbital 4" />
-  <img src="images/5.png" width="32%" alt="Orbital 5" />
-  <img src="images/6.png" width="32%" alt="Orbital 6" />
-</p>
-
 ## **Building Requirements:**
 
 1. C++ Compiler supporting C++ 17 or newer
@@ -81,23 +67,6 @@ the 2D bohr model works is in atom.cpp, the raytracer and realtime models are ri
 - `Q/E` - Move camera down/up
 - `Space/Ctrl` - Move camera up/down
 - `ESC` - Exit
-
-## **UI Features:**
-- **Debug Panel** (top-right): 
-  - Real-time FPS counter (green, smoothed over 30 frames)
-  - Particle count display
-  - Current mode with color coding (blue=quantum, orange=classical)
-  - Quantum numbers (n=orange, l=green, m=blue)
-  - Camera position (X, Y, Z)
-  - **Time Scale** with color coding (red=fast, blue=slow, white=normal)
-  - Generation progress bar with percentage
-  - Drop shadow and glowing borders
-  
-- **Debug Log** (press P): 
-  - Event history (mode switches, quantum changes, time scale)
-  - Smooth fade effects for older messages (alpha gradient)
-  - Auto-scrolling with up to 50 messages
-  - Beautiful Inter font support (auto-fallback to crisp bitmap font)
 
 ## **Performance Optimizations:**
 - **CDF Table Caching**: Quantum number tables cached - instant mode switching (no recalculation)

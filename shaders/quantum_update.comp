@@ -1,0 +1,58 @@
+#version 430 core
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer CloudBuffer {
+    vec4 data[];
+};
+
+uniform float uDeltaTime;
+uniform float uSimTime;
+uniform int uM;
+uniform int uN;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint k = idx * 2u;
+    
+    if (k >= data.length()) return;
+
+    vec3 p = data[k].xyz;
+    float r = length(p);
+    if (r < 1e-5) return;
+
+    float invR = 1.0 / r;
+    float cosTheta = clamp(p.z * invR, -1.0, 1.0);
+    float phi = atan(p.y, p.x);
+
+    float rFall = 3.2 * float(max(1, uN)) * float(max(1, uN));
+    float phiDelta = (uM != 0) ? float(uM) * uDeltaTime * 0.055 : 0.0;
+    float spin = 0.009 * uDeltaTime;
+    float cosSpin = cos(spin);
+    float sinSpin = sin(spin);
+
+    if (phiDelta != 0.0) {
+        phi += phiDelta;
+        float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+        float cosPhi = cos(phi);
+        float sinPhi = sin(phi);
+        p.x = r * sinTheta * cosPhi;
+        p.y = r * sinTheta * sinPhi;
+        p.z = r * cosTheta;
+    }
+
+    float px = p.x * cosSpin - p.z * sinSpin;
+    float pz = p.x * sinSpin + p.z * cosSpin;
+    p.x = px;
+    p.z = pz;
+
+    bool doPulse = (uM == 0);
+    if (doPulse) {
+        float w = exp(-r / max(1.5, rFall));
+        float pulseFreq = uSimTime * 1.35;
+        float pulse = 1.0 + 0.0065 * w * sin(pulseFreq + float(idx) * 2.718e-4);
+        p *= pulse;
+    }
+
+    data[k].xyz = p;
+}
