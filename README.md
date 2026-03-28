@@ -7,6 +7,20 @@ What the model does:
 2. Using the schrodinger equation, sample r, theta, and phi coordinates from those quantum numbers
 3. Render those possible positions and color code them relative to their probabilities (brighter areas have higher probability)
 
+Screenshots
+
+<p align="center">
+  <img src="images/1.png" width="32%" alt="Orbital" />
+  <img src="images/7.png" width="32%" alt="Orbital" />
+  <img src="images/3.png" width="32%" alt="Orbital" />
+</p>
+<p align="center">
+  <img src="images/4.png" width="32%" alt="Orbital 4" />
+  <img src="images/5.png" width="32%" alt="Orbital 5" />
+  <img src="images/6.png" width="32%" alt="Orbital 6" />
+</p>
+
+
 ## **Building Requirements:**
 
 1. C++ Compiler supporting C++ 17 or newer
