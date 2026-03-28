@@ -45,6 +45,7 @@ add_executable(${PROJECT_NAME}
     src/Atom.cpp
     src/QuantumHydrogen.cpp
     src/SphereMesh.cpp
+    src/SimpleUI.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -65,6 +66,9 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_SOURCE_DIR}/shaders"
         "$<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/fonts"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/fonts"
 )
 
 if(MSVC)

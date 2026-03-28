@@ -6,15 +6,20 @@
 #include "Camera.hpp"
 #include "QuantumHydrogen.hpp"
 #include "Shader.hpp"
+#include "SimpleUI.hpp"
 #include "SphereMesh.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <chrono>
 #include <cmath>
+#include <deque>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <random>
+#include <sstream>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -46,9 +51,28 @@ struct App {
     int qn = 2;
     int ql = 1;
     int qm = 0;
+    bool needsRegeneration = false;
+    int lastQn = 2;
+    int lastQl = 1;
+    int lastQm = 0;
+    float bufferUpdateAccum = 0.0f;
+    float bufferUpdateInterval = 0.016f;
+    bool vsyncEnabled = true;
+    SimpleUI* ui = nullptr;
+    bool showConsole = false;
+    std::deque<std::string> consoleLines;
+    std::deque<float> fpsHistory;
+    float fpsSmooth = 60.0f;
+    bool isGenerating = false;
+    std::uint32_t genProgress = 0;
+    std::uint32_t genChunkSize = 20000;
+    float timeScale = 1.0f;
 };
 
 static App* g_app = nullptr;
+
+static void applyQuantumNumbers(App& app);
+static void rebuildOrbit(App& app);
 
 static fs::path resolveShaderRoot(int argc, char** argv) {
     if (argc > 0) {
@@ -69,13 +93,21 @@ static fs::path resolveShaderRoot(int argc, char** argv) {
 }
 
 static void applyQuantumNumbers(App& app) {
+    if (app.lastQn == app.qn && app.lastQl == app.ql && app.lastQm == app.qm) {
+        return;
+    }
+    
     app.sampler.setQuantumNumbers(app.qn, app.ql, app.qm);
-    app.sampler.generate(app.cloudPacked, app.cloudCount, app.simTime, app.rng);
-    if (app.vboCloudInst) {
-        glBindBuffer(GL_ARRAY_BUFFER, app.vboCloudInst);
-        const GLsizeiptr bytes =
-            static_cast<GLsizeiptr>(app.cloudPacked.size() * sizeof(glm::vec4));
-        glBufferData(GL_ARRAY_BUFFER, bytes, app.cloudPacked.data(), GL_DYNAMIC_DRAW);
+    app.needsRegeneration = true;
+    app.lastQn = app.qn;
+    app.lastQl = app.ql;
+    app.lastQm = app.qm;
+    
+    std::ostringstream oss;
+    oss << "Quantum state: n=" << app.qn << " l=" << app.ql << " m=" << app.qm;
+    app.consoleLines.push_back(oss.str());
+    if (app.consoleLines.size() > 20) {
+        app.consoleLines.pop_front();
     }
 }
 
@@ -95,6 +127,9 @@ static void framebufferSizeCallback(GLFWwindow* /*w*/, int width, int height) {
     g_app->fbHeight = height;
     glViewport(0, 0, width, height);
     g_app->camera->onResize(width, height);
+    if (g_app->ui) {
+        g_app->ui->resize(width, height);
+    }
 }
 
 static void keyCallback(GLFWwindow* w, int key, int /*scancode*/, int action, int /*mods*/) {
@@ -112,9 +147,13 @@ static void keyCallback(GLFWwindow* w, int key, int /*scancode*/, int action, in
         }
 
         if (key == GLFW_KEY_TAB) {
-
             g_app->quantumMode = !g_app->quantumMode;
-
+            std::ostringstream oss;
+            oss << "Switched to " << (g_app->quantumMode ? "Quantum" : "Classical") << " mode";
+            g_app->consoleLines.push_back(oss.str());
+            if (g_app->consoleLines.size() > 20) {
+                g_app->consoleLines.pop_front();
+            }
         }
 
         if (key == GLFW_KEY_R) {
@@ -321,6 +360,21 @@ static void keyCallback(GLFWwindow* w, int key, int /*scancode*/, int action, in
 
         }
 
+        if (key == GLFW_KEY_V) {
+            g_app->vsyncEnabled = !g_app->vsyncEnabled;
+            glfwSwapInterval(g_app->vsyncEnabled ? 1 : 0);
+            std::ostringstream oss;
+            oss << "VSync " << (g_app->vsyncEnabled ? "enabled" : "disabled");
+            g_app->consoleLines.push_back(oss.str());
+            if (g_app->consoleLines.size() > 20) {
+                g_app->consoleLines.pop_front();
+            }
+        }
+
+        if (key == GLFW_KEY_P) {
+            g_app->showConsole = !g_app->showConsole;
+        }
+
     } else if (action == GLFW_RELEASE) {
 
         g_app->keys[key] = false;
@@ -332,13 +386,23 @@ static void keyCallback(GLFWwindow* w, int key, int /*scancode*/, int action, in
 
 
 static void cursorPosCallback(GLFWwindow* /*w*/, double x, double y) {
-
     if (g_app && g_app->camera) {
-
         g_app->camera->onMouseMoved(x, y);
-
     }
+}
 
+static void scrollCallback(GLFWwindow* /*w*/, double /*xoffset*/, double yoffset) {
+    if (!g_app) return;
+    
+    g_app->timeScale += static_cast<float>(yoffset) * 0.2f;
+    g_app->timeScale = std::max(0.1f, std::min(10.0f, g_app->timeScale));
+    
+    std::ostringstream oss;
+    oss << "Time scale: " << std::fixed << std::setprecision(1) << g_app->timeScale << "x";
+    g_app->consoleLines.push_back(oss.str());
+    if (g_app->consoleLines.size() > 50) {
+        g_app->consoleLines.pop_front();
+    }
 }
 
 static void drawColoredSphere(Shader& sh, const SphereMesh& mesh, const glm::mat4& view,
@@ -464,11 +528,9 @@ int main(int argc, char** argv) {
     glfwSwapInterval(1);
 
     glfwSetFramebufferSizeCallback(app.window, framebufferSizeCallback);
-
     glfwSetKeyCallback(app.window, keyCallback);
-
     glfwSetCursorPosCallback(app.window, cursorPosCallback);
-
+    glfwSetScrollCallback(app.window, scrollCallback);
     glfwSetInputMode(app.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
 
@@ -528,64 +590,71 @@ int main(int argc, char** argv) {
     SphereMesh meshUnit(1.0f, 14, 14);
 
     app.shaderLine = &shLine;
-
     app.shaderParticles = &shParticles;
-
     app.shaderSphere = &shSphere;
+
+    SimpleUI ui;
+    const std::string fontPath = (app.shaderRoot.parent_path() / "fonts" / "Inter-Regular.ttf").string();
+    ui.init(app.fbWidth, app.fbHeight, fontPath);
+    app.ui = &ui;
 
 
 
     app.atom.bohrN = app.qn;
-
     app.atom.setupHydrogen();
-
     app.sampler.setQuantumNumbers(app.qn, app.ql, app.qm);
-
     app.sampler.generate(app.cloudPacked, app.cloudCount, app.simTime, app.rng);
 
-
-
     initGpuBuffers(app);
-
     rebuildOrbit(app);
 
     glBindBuffer(GL_ARRAY_BUFFER, app.vboCloudInst);
-
     const GLsizeiptr cloudBytes =
-
         static_cast<GLsizeiptr>(app.cloudPacked.size() * sizeof(glm::vec4));
-
     glBufferData(GL_ARRAY_BUFFER, cloudBytes, app.cloudPacked.data(), GL_DYNAMIC_DRAW);
 
-
-
+    app.lastQn = app.qn;
+    app.lastQn = app.qn;
+    app.lastQl = app.ql;
+    app.lastQm = app.qm;
+    app.needsRegeneration = false;
     app.lastT = glfwGetTime();
+
+    app.consoleLines.push_back("=== Quantum Atom Visualizer ===");
+    app.consoleLines.push_back("Press P to toggle debug log");
+    app.consoleLines.push_back("Controls: TAB=mode, 1/2/3=presets, V=vsync");
+    app.consoleLines.push_back("Mouse wheel to adjust time scale");
+    app.consoleLines.push_back("System initialized successfully");
 
 
 
     while (!glfwWindowShouldClose(app.window)) {
-
         const double now = glfwGetTime();
-
         const float dt = static_cast<float>(now - app.lastT);
-
         app.lastT = now;
-
         app.simTime += dt;
 
+        const float currentFps = (dt > 0.0f) ? (1.0f / dt) : 60.0f;
+        app.fpsHistory.push_back(currentFps);
+        if (app.fpsHistory.size() > 30) {
+            app.fpsHistory.pop_front();
+        }
+        float fpsSum = 0.0f;
+        for (float f : app.fpsHistory) {
+            fpsSum += f;
+        }
+        app.fpsSmooth = fpsSum / static_cast<float>(app.fpsHistory.size());
 
 
+
+        const float scaledDt = dt * app.timeScale;
+        
         camera.processFrame(dt, app.keys[GLFW_KEY_W], app.keys[GLFW_KEY_S],
+                           app.keys[GLFW_KEY_A], app.keys[GLFW_KEY_D], app.keys[GLFW_KEY_E],
+                           app.keys[GLFW_KEY_Q], app.keys[GLFW_KEY_SPACE],
+                           app.keys[GLFW_KEY_LEFT_CONTROL]);
 
-                            app.keys[GLFW_KEY_A], app.keys[GLFW_KEY_D], app.keys[GLFW_KEY_E],
-
-                            app.keys[GLFW_KEY_Q], app.keys[GLFW_KEY_SPACE],
-
-                            app.keys[GLFW_KEY_LEFT_CONTROL]);
-
-
-
-        app.atom.updateClassical(dt);
+        app.atom.updateClassical(scaledDt);
 
 
 
@@ -611,37 +680,52 @@ int main(int argc, char** argv) {
         const glm::vec3 electronColor(0.2f, 0.75f, 1.0f);
 
         if (app.quantumMode) {
-
-            HydrogenOrbitalSampler::stepCloudPositions(app.cloudPacked, dt, app.qm, app.simTime,
-
-                                                      app.qn);
-
-            glBindBuffer(GL_ARRAY_BUFFER, app.vboCloudInst);
-
-            glBufferSubData(GL_ARRAY_BUFFER, 0,
-
-                            static_cast<GLsizeiptr>(app.cloudPacked.size() * sizeof(glm::vec4)),
-
-                            app.cloudPacked.data());
+            if (app.needsRegeneration && !app.isGenerating) {
+                app.isGenerating = true;
+                app.genProgress = 0;
+                app.needsRegeneration = false;
+            }
+            
+            if (app.isGenerating) {
+                const std::uint32_t remaining = app.cloudCount - app.genProgress;
+                const std::uint32_t toGen = std::min(app.genChunkSize, remaining);
+                
+                app.sampler.generateChunk(app.cloudPacked, app.genProgress, toGen, 
+                                        app.cloudCount, app.simTime, app.rng);
+                app.genProgress += toGen;
+                
+                if (app.genProgress >= app.cloudCount) {
+                    glBindBuffer(GL_ARRAY_BUFFER, app.vboCloudInst);
+                    glBufferData(GL_ARRAY_BUFFER,
+                                static_cast<GLsizeiptr>(app.cloudPacked.size() * sizeof(glm::vec4)),
+                                app.cloudPacked.data(), GL_DYNAMIC_DRAW);
+                    app.isGenerating = false;
+                    app.bufferUpdateAccum = 0.0f;
+                }
+            } else {
+                app.bufferUpdateAccum += scaledDt;
+                if (app.bufferUpdateAccum >= app.bufferUpdateInterval) {
+                    HydrogenOrbitalSampler::stepCloudPositions(app.cloudPacked, app.bufferUpdateAccum, 
+                                                              app.qm, app.simTime, app.qn);
+                    
+                    glBindBuffer(GL_ARRAY_BUFFER, app.vboCloudInst);
+                    void* ptr = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+                    if (ptr) {
+                        std::memcpy(ptr, app.cloudPacked.data(), app.cloudPacked.size() * sizeof(glm::vec4));
+                        glUnmapBuffer(GL_ARRAY_BUFFER);
+                    }
+                    app.bufferUpdateAccum = 0.0f;
+                }
+            }
 
             glDepthMask(GL_FALSE);
-
             app.shaderParticles->use();
-
             app.shaderParticles->setMat4("uView", glm::value_ptr(view));
-
             app.shaderParticles->setMat4("uProj", glm::value_ptr(proj));
-
-            app.shaderParticles->setFloat("uPointScale",
-
-                                          0.024f * static_cast<float>(app.fbHeight));
-
+            app.shaderParticles->setFloat("uPointScale", 0.024f * static_cast<float>(app.fbHeight));
             app.shaderParticles->setFloat("uTime", app.simTime);
-
             glBindVertexArray(app.vaoCloud);
-
             glDrawArraysInstanced(GL_POINTS, 0, 1, static_cast<GLsizei>(app.cloudCount));
-
             glDepthMask(GL_TRUE);
 
         } else {
@@ -668,12 +752,19 @@ int main(int argc, char** argv) {
             }
         }
 
-
+        app.ui->beginFrame();
+        const float genProg = app.isGenerating ? 
+            (static_cast<float>(app.genProgress) / static_cast<float>(app.cloudCount)) : 0.0f;
+        app.ui->drawDebugPanel(app.fpsSmooth, static_cast<int>(app.cloudCount), 
+                              app.qn, app.ql, app.qm, app.quantumMode, camPos, app.timeScale,
+                              app.isGenerating, genProg);
+        
+        std::vector<std::string> consoleVec(app.consoleLines.begin(), app.consoleLines.end());
+        app.ui->drawConsole(app.showConsole, consoleVec);
+        app.ui->endFrame();
 
         glfwSwapBuffers(app.window);
-
         glfwPollEvents();
-
     }
 
 

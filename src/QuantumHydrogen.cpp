@@ -46,11 +46,35 @@ void HydrogenOrbitalSampler::setQuantumNumbers(int n, int l, int m) {
     if (m > l) {
         m = l;
     }
+    
+    if (m_n == n && m_l == l && m_m == m) {
+        return;
+    }
+    
     m_m = m;
     m_mmag = std::abs(m);
     m_n = n;
     m_l = l;
-    rebuildTables();
+    
+    auto key = std::make_tuple(n, l, std::abs(m));
+    auto it = m_cache.find(key);
+    
+    if (it != m_cache.end()) {
+        m_rMid = it->second.rMid;
+        m_rCdf = it->second.rCdf;
+        m_thetaMid = it->second.thetaMid;
+        m_thetaCdf = it->second.thetaCdf;
+        m_rMax = it->second.rMax;
+    } else {
+        rebuildTables();
+        CachedTables cached;
+        cached.rMid = m_rMid;
+        cached.rCdf = m_rCdf;
+        cached.thetaMid = m_thetaMid;
+        cached.thetaCdf = m_thetaCdf;
+        cached.rMax = m_rMax;
+        m_cache[key] = std::move(cached);
+    }
 }
 
 double HydrogenOrbitalSampler::factorial(int k) {
@@ -247,25 +271,46 @@ double HydrogenOrbitalSampler::psiImag(double r, double theta, double phi,
 void HydrogenOrbitalSampler::generate(std::vector<glm::vec4>& outPacked, std::uint32_t count,
                                       float timePhase, std::mt19937& rng) const {
     outPacked.resize(static_cast<std::size_t>(count) * 2);
+    generateChunk(outPacked, 0, count, count, timePhase, rng);
+}
+
+void HydrogenOrbitalSampler::generateChunk(std::vector<glm::vec4>& outPacked, 
+                                           std::uint32_t startIdx, std::uint32_t chunkSize,
+                                           std::uint32_t totalCount, float timePhase, 
+                                           std::mt19937& rng) const {
+    if (outPacked.size() < static_cast<std::size_t>(totalCount) * 2) {
+        outPacked.resize(static_cast<std::size_t>(totalCount) * 2);
+    }
+    
     std::uniform_real_distribution<double> u01(0.0, 1.0);
+    
     double rhoMax = 0.0;
-    for (double rmid : m_rMid) {
-        for (double tmid : m_thetaMid) {
-            const double R = radialRnl(rmid);
-            const double ad = angularDensity(m_l, m_mmag, tmid);
+    const std::size_t rStep = std::max(std::size_t(1), m_rMid.size() / 32);
+    const std::size_t tStep = std::max(std::size_t(1), m_thetaMid.size() / 32);
+    
+    for (std::size_t ri = 0; ri < m_rMid.size(); ri += rStep) {
+        for (std::size_t ti = 0; ti < m_thetaMid.size(); ti += tStep) {
+            const double R = radialRnl(m_rMid[ri]);
+            const double ad = angularDensity(m_l, m_mmag, m_thetaMid[ti]);
             rhoMax = std::max(rhoMax, R * R * ad);
         }
     }
     if (rhoMax <= 0.0) {
         rhoMax = 1.0;
     }
-    for (std::uint32_t i = 0; i < count; ++i) {
+    
+    const std::uint32_t endIdx = std::min(startIdx + chunkSize, totalCount);
+    for (std::uint32_t i = startIdx; i < endIdx; ++i) {
         const double r = sampleFromCdf(m_rMid, m_rCdf, u01(rng));
         const double theta = sampleFromCdf(m_thetaMid, m_thetaCdf, u01(rng));
         const double phi = u01(rng) * 2.0 * 3.14159265358979323846;
-        const double x = r * std::sin(theta) * std::cos(phi);
-        const double y = r * std::sin(theta) * std::sin(phi);
-        const double z = r * std::cos(theta);
+        const double sinTheta = std::sin(theta);
+        const double cosTheta = std::cos(theta);
+        const double cosPhi = std::cos(phi);
+        const double sinPhi = std::sin(phi);
+        const double x = r * sinTheta * cosPhi;
+        const double y = r * sinTheta * sinPhi;
+        const double z = r * cosTheta;
         const double pr = psiReal(r, theta, phi, timePhase);
         const double pi = psiImag(r, theta, phi, timePhase);
         const float phase = static_cast<float>(std::atan2(pi, pr));
@@ -289,32 +334,47 @@ void HydrogenOrbitalSampler::stepCloudPositions(std::vector<glm::vec4>& packed, 
     const std::size_t n = packed.size() / 2;
     const float rFall =
         3.2f * static_cast<float>(std::max(1, principalN)) * static_cast<float>(std::max(1, principalN));
+    
+    const float phiDelta = (mSigned != 0) ? static_cast<float>(mSigned) * dt * 0.055f : 0.0f;
+    const float spin = 0.009f * dt;
+    const float cosSpin = std::cos(spin);
+    const float sinSpin = std::sin(spin);
+    
+    const bool doPulse = (mSigned == 0);
+    const float pulseFreq = simTime * 1.35f;
+    
     for (std::size_t i = 0; i < n; ++i) {
         glm::vec3 p(packed[i * 2]);
-        float r = glm::length(p);
+        const float r = glm::length(p);
         if (r < 1e-5f) {
             continue;
         }
-        const float w = std::exp(-r / std::max(1.5f, rFall));
-        float theta = std::acos(glm::clamp(p.z / r, -1.0f, 1.0f));
+        
+        const float invR = 1.0f / r;
+        const float cosTheta = glm::clamp(p.z * invR, -1.0f, 1.0f);
         float phi = std::atan2(p.y, p.x);
-        if (mSigned != 0) {
-            phi += static_cast<float>(mSigned) * dt * 0.055f;
+        
+        if (phiDelta != 0.0f) {
+            phi += phiDelta;
+            const float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
+            const float cosPhi = std::cos(phi);
+            const float sinPhi = std::sin(phi);
+            p.x = r * sinTheta * cosPhi;
+            p.y = r * sinTheta * sinPhi;
+            p.z = r * cosTheta;
         }
-        const float sp = std::sin(theta);
-        p.x = r * sp * std::cos(phi);
-        p.y = r * sp * std::sin(phi);
-        p.z = r * std::cos(theta);
-        const float spin = 0.009f * dt;
-        const glm::mat3 Ry =
-            glm::mat3(glm::rotate(glm::mat4(1.0f), spin, glm::vec3(0.0f, 1.0f, 0.0f)));
-        p = Ry * p;
-        if (mSigned == 0) {
-            const float pulse =
-                1.0f + 0.0065f * w *
-                           std::sin(simTime * 1.35f + static_cast<float>(i) * 2.718e-4f);
+        
+        const float px = p.x * cosSpin - p.z * sinSpin;
+        const float pz = p.x * sinSpin + p.z * cosSpin;
+        p.x = px;
+        p.z = pz;
+        
+        if (doPulse) {
+            const float w = std::exp(-r / std::max(1.5f, rFall));
+            const float pulse = 1.0f + 0.0065f * w * std::sin(pulseFreq + static_cast<float>(i) * 2.718e-4f);
             p *= pulse;
         }
+        
         packed[i * 2].x = p.x;
         packed[i * 2].y = p.y;
         packed[i * 2].z = p.z;

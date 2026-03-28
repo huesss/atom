@@ -3,7 +3,9 @@
 #include <glm/glm.hpp>
 
 #include <cstdint>
+#include <map>
 #include <random>
+#include <tuple>
 #include <vector>
 
 class HydrogenOrbitalSampler {
@@ -13,6 +15,10 @@ public:
     void setQuantumNumbers(int n, int l, int m);
     void generate(std::vector<glm::vec4>& outPacked, std::uint32_t count, float timePhase,
                   std::mt19937& rng) const;
+    
+    void generateChunk(std::vector<glm::vec4>& outPacked, std::uint32_t startIdx, 
+                      std::uint32_t chunkSize, std::uint32_t totalCount, 
+                      float timePhase, std::mt19937& rng) const;
 
     static void stepCloudPositions(std::vector<glm::vec4>& packed, float dt, int mSigned,
                                    float simTime, int principalN);
@@ -32,6 +38,16 @@ private:
     std::vector<double> m_thetaMid;
     std::vector<double> m_thetaCdf;
     double m_rMax = 1.0;
+
+    struct CachedTables {
+        std::vector<double> rMid;
+        std::vector<double> rCdf;
+        std::vector<double> thetaMid;
+        std::vector<double> thetaCdf;
+        double rMax;
+    };
+    
+    mutable std::map<std::tuple<int, int, int>, CachedTables> m_cache;
 
     void rebuildTables();
     static double factorial(int k);
